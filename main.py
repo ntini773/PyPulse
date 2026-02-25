@@ -9,9 +9,14 @@ import multiprocessing
 import requests
 
 from dotenv import load_dotenv
+try:
+    from google import genai
+except ImportError:
+    print("[!] 'google-genai' library not found. Please run: pip install google-genai")
+
 
 MAX_FOLDER_SIZE =  10 * 1024 # 10 KB in bytes
-MODEL_ID = "gemini-1.5-flash"
+MODEL_ID = "gemini-3-flash-preview"
 MOCK_API_URL = "https://httpbin.org"
 class FakeServer:
     def __init__(self,server_path,stop_event):
@@ -19,27 +24,25 @@ class FakeServer:
         if not os.path.exists(server_path):
             print(f"[*] Server path {self.server_path} not found. Creating...")
             os.makedirs(server_path,mode=0o700)
-            print("[*] Generating dummy logs (Watchdog is active)...")
-            for i in range(10000):
-                if stop_event.is_set(): # <--- CHECK THE FLAG
-                    print("\n[!] Log generation halted by Watchdog: Storage limit exceeded.")
-                    break
-                # file_name = Path(server_path)/f"file_{i}.log"
-                log_file = self.server_path / f"node_{i}.log"
-                data_dict = {
-                    "timestamp": time.time(),
-                    "node_id": f"Srv-Alpha-{i % 5}",
-                    "status": "ERROR" if i % 10 == 0 else "OK",
-                    "metrics": {"cpu": i * 1.5, "mem": i * 0.8},
-                    "message": "Heartbeat pulse detected"
-                }
-                # content = json.dumps(data_dict,indent=4)
-                with open(log_file,"w") as f:
-                    # f.write(content)
-                    json.dump(data_dict,f,indent=4)
-                time.sleep(0.2)
-        else:
-            print("[*] Server environment exists. Proceeding to processing.")
+        print("[*] Generating dummy logs (Watchdog is active)...")
+        for i in range(10000):
+            if stop_event.is_set(): # <--- CHECK THE FLAG
+                print("\n[!] Log generation halted by Watchdog: Storage limit exceeded.")
+                break
+            # file_name = Path(server_path)/f"file_{i}.log"
+            log_file = self.server_path / f"node_{i}.log"
+            data_dict = {
+                "timestamp": time.time(),
+                "node_id": f"Srv-Alpha-{i % 5}",
+                "status": "ERROR" if i % 10 == 0 else "OK",
+                "metrics": {"cpu": i * 1.5, "mem": i * 0.8},
+                "message": "Heartbeat pulse detected"
+            }
+            # content = json.dumps(data_dict,indent=4)
+            with open(log_file,"w") as f:
+                # f.write(content)
+                json.dump(data_dict,f,indent=4)
+            time.sleep(0.2)
 
 def watchdog(server_path,stop_event):
     while not stop_event.is_set():
@@ -149,6 +152,7 @@ class Archiver:
         
         # Remove the directory itself if empty
         if os.path.exists(server_path):
+            print(f"REMOVING LOG DIRECTORY {server_path}")
             try:
                 os.removedirs(server_path)
                 print(f"REMOVED LOG DIRECTORY")
@@ -160,25 +164,22 @@ class Archiver:
         print("[+] Raw log storage purged. System Clean.")
 
 class ControlPlane:
-    """Phase 4: Remote Sync & AI Analysis (Requests + JSON)."""
+    """Phase 4: Remote Sync & AI Analysis (SDK + Requests)."""
     def __init__(self):
-        self.api_key = os.getenv("GEMINI_API_KEY", "")
-        self.ai_url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_ID}:generateContent?key={self.api_key}"
+        api_key = os.getenv("GEMINI_API_KEY", "")
+        # Initialize the new google-genai Client
+        self.client = genai.Client(api_key=api_key) if api_key else None
         self.config_url = f"{MOCK_API_URL}/get"
         self.post_url = f"{MOCK_API_URL}/post"
 
     def fetch_remote_config(self):
-        """NEW: Demonstrates requests.get to fetch system instructions from a mock API."""
+        """Uses requests.get to simulate pulling instructions from a server."""
         print(f"[*] Fetching remote orchestrator config from {self.config_url}...")
         try:
-            # We send some params to simulate identifying this local node
-            params = {"node_id": "Srv-Alpha", "version": "1.0.2"}
+            params = {"node_id": "Srv-Alpha", "version": "SDK-Enabled-1.0"}
             response = requests.get(self.config_url, params=params, timeout=5)
             response.raise_for_status()
-            
-            data = response.json()
-            # httpbin returns sent params in the 'args' key
-            remote_params = data.get("args", {})
+            remote_params = response.json().get("args", {})
             print(f"[+] Remote config acknowledged for Node: {remote_params.get('node_id', 'Unknown')}")
             return True
         except Exception as e:
@@ -186,7 +187,7 @@ class ControlPlane:
             return False
 
     def fallback_sync(self, log_summary):
-        """Standard POST sync if AI fails."""
+        """Standard POST sync using requests if AI fails."""
         print(f"[*] Falling back to Standard Sync via {self.post_url}...")
         payload = {
             "orchestrator_status": "COMPLETED",
@@ -196,47 +197,42 @@ class ControlPlane:
         try:
             response = requests.post(self.post_url, json=payload, timeout=5)
             response.raise_for_status()
-            
-            # Demonstrating reading the reply from a mock POST API
-            server_reply = response.json()
-            print(f"[+] Fallback Sync Successful. Server echo-location: {server_reply.get('origin')}")
+            print(f"[+] Fallback Sync Successful. Server IP: {response.json().get('origin')}")
             return True
         except Exception as e:
-            print(f"[!] Fallback Sync also failed: {e}")
+            print(f"[!] Fallback Sync failed: {e}")
             return False
 
     def analyze_with_ai(self, log_summary):
-        """Primary Sync: AI Health Analysis."""
-        if not self.api_key:
-            print("[!] No API Key found. Skipping AI Analysis.")
+        """Primary Sync: AI Health Analysis using google-genai SDK."""
+        if not self.client:
+            print("[!] No GEMINI_API_KEY found in environment. Skipping AI Analysis.")
             return self.fallback_sync(log_summary)
 
-        print("[*] Syncing with Cloud AI Control Plane...")
+        print("[*] Syncing with Cloud AI Control Plane via google-genai SDK...")
         summary_payload = log_summary[:20] 
         prompt = (
             f"Analyze these system log snippets: {json.dumps(summary_payload)}. "
-            "Provide a 2-line executive summary. Line 1: Health %. Line 2: Critical nodes."
+            "Provide a 3-line executive summary. Line 1: Health status percentage. Line 2: Critical node IDs. Line 3: What do you understand by these logs?"
         )
-        
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
         try:
-            response = requests.post(self.ai_url, json=payload, timeout=10)
+            # Using the official SDK method
+            response = self.client.models.generate_content(
+                model=MODEL_ID,
+                contents=prompt
+            )
             
-            if response.status_code == 404:
-                print(f"[!] AI Model 404: {MODEL_ID} not found.")
+            if response.text:
+                print(f"\n--- AI ORCHESTRATOR SUMMARY (SDK) ---\n{response.text.strip()}\n")
+                return True
+            else:
+                print("[!] SDK returned empty response.")
                 return self.fallback_sync(log_summary)
-            
-            response.raise_for_status()
-            result = response.json()
-            summary = result['candidates'][0]['content']['parts'][0]['text']
-            print(f"\n--- AI ORCHESTRATOR SUMMARY ---\n{summary.strip()}\n")
-            return True
-            
+                
         except Exception as e:
-            print(f"[!] AI Sync failed: {e}")
+            print(f"[!] SDK AI Sync failed: {e}")
             return self.fallback_sync(log_summary)
-
 
 def main():
     parser = argparse.ArgumentParser(description="Initialize a fake server.")
